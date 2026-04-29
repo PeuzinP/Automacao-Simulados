@@ -3,11 +3,48 @@ from tkinter import filedialog, messagebox
 import subprocess
 import os
 import threading
+from omr_reader import processar_imagens_omr
 
 
 pasta_projeto = os.getcwd()
 
+def abrir_painel_validacao():
+    try:
+        escrever_log("Abrindo painel de validação OCR...")
 
+        subprocess.Popen(
+            "python painel_validacao.py",
+            cwd=pasta_projeto,
+            shell=True
+        )
+
+    except Exception as e:
+        messagebox.showerror("Erro", str(e))
+        
+def selecionar_imagens_omr():
+    pasta = filedialog.askdirectory()
+
+    if not pasta:
+        return
+
+    try:
+        caixa_log.delete("1.0", tk.END)
+        escrever_log("Iniciando leitura OMR...")
+        escrever_log(f"Pasta selecionada: {pasta}")
+
+        resultado = processar_imagens_omr(pasta)
+
+        escrever_log(f"Total de imagens encontradas: {resultado['total_imagens']}")
+        escrever_log(f"Log gerado em: {resultado['log']}")
+
+        messagebox.showinfo(
+            "Leitura OMR",
+            f"{resultado['total_imagens']} imagem(ns) encontrada(s).\nLog gerado com sucesso."
+        )
+
+    except Exception as e:
+        messagebox.showerror("Erro", str(e))
+         
 def escolher_pasta():
     global pasta_projeto
 
@@ -132,6 +169,15 @@ frame_botoes.pack(pady=15)
 
 tk.Button(
     frame_botoes,
+    text="Selecionar Imagens OMR",
+    command=selecionar_imagens_omr,
+    width=22,
+    bg="#673ab7",
+    fg="white"
+).grid(row=1, column=0, padx=5, pady=8)
+
+tk.Button(
+    frame_botoes,
     text="Atualizar Base",
     command=atualizar_base,
     width=18,
@@ -150,17 +196,26 @@ tk.Button(
 
 tk.Button(
     frame_botoes,
+    text="Painel de Validação",
+    command=abrir_painel_validacao,
+    width=18,
+    bg="#ff9800",
+    fg="white"
+).grid(row=0, column=2, padx=5)
+
+tk.Button(
+    frame_botoes,
     text="Abrir Saída",
     command=abrir_saida,
     width=18
-).grid(row=0, column=2, padx=5)
+).grid(row=0, column=3, padx=5)
 
 tk.Button(
     frame_botoes,
     text="Abrir Pendências",
     command=abrir_pendencias,
     width=18
-).grid(row=0, column=3, padx=5)
+).grid(row=0, column=4, padx=5)
 
 tk.Label(janela, text="Log do processamento:").pack(anchor="w", padx=20)
 
