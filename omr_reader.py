@@ -334,18 +334,30 @@ def transformar_ponto(matriz, x, y):
 
     return float(transformado[0][0][0]), float(transformado[0][0][1])
 
-
-def medir_preenchimento_por_ponto(imagem_cinza, x, y, raio=10):
+def ordenar_perguntas_formscanner(questions):
     """
-    Mede a força da marcação em uma bolha.
+    Ordena Pergunta001, Pergunta002, Pergunta003...
+    """
+    def chave(item):
+        nome = item[0]
 
-    Combina:
-    - percentual de pixels escuros
-    - maior componente preto conectado
-    - escurecimento médio da região
+        try:
+            return int(nome.replace("Pergunta", ""))
+        except Exception:
+            return 99999
 
-    Isso reduz falso positivo de letras impressas e melhora leitura
-    de marcações reais mais fracas.
+    return dict(sorted(questions.items(), key=chave))
+
+
+def analisar_bolha_por_ponto(imagem_cinza, x, y, raio=10):
+    """
+    Analisa uma bolha considerando:
+    - percentual de área escura;
+    - maior componente escuro conectado;
+    - escurecimento médio.
+
+    Esta foi a versão mais equilibrada antes das tentativas com núcleo,
+    anel, patches e limite global.
     """
 
     altura, largura = imagem_cinza.shape[:2]
@@ -363,32 +375,35 @@ def medir_preenchimento_por_ponto(imagem_cinza, x, y, raio=10):
     recorte = imagem_cinza[y1:y2, x1:x2]
 
     if recorte.size == 0:
-        return 0
+        return {
+            "score": 0,
+            "percentual_escuro": 0,
+            "maior_componente": 0,
+            "percentual_componente": 0,
+            "escurecimento_medio": 0
+        }
+
+    recorte = cv2.GaussianBlur(recorte, (3, 3), 0)
 
     h, w = recorte.shape[:2]
-
-    centro_x = w // 2
-    centro_y = h // 2
+    cx = w // 2
+    cy = h // 2
 
     yy, xx = np.ogrid[:h, :w]
 
-    mascara = (
-        (xx - centro_x) ** 2 + (yy - centro_y) ** 2
-    ) <= raio_leitura ** 2
+    mascara = ((xx - cx) ** 2 + (yy - cy) ** 2) <= raio_leitura ** 2
 
     pixels = recorte[mascara]
 
     if pixels.size == 0:
-        return 0
+        return {
+            "score": 0,
+            "percentual_escuro": 0,
+            "maior_componente": 0,
+            "percentual_componente": 0,
+            "escurecimento_medio": 0
+        }
 
-    # Pixels bem escuros. Marca real costuma gerar muitos.
-    escuros = pixels < 105
-    percentual_escuro = np.mean(escuros) * 100
-
-    # Escurecimento médio da bolha.
-    escurecimento_medio = 255 - np.mean(pixels)
-
-    # Maior mancha conectada.
     binaria = np.zeros_like(recorte, dtype=np.uint8)
     binaria[(recorte < 105) & mascara] = 255
 
@@ -401,67 +416,188 @@ def medir_preenchimento_por_ponto(imagem_cinza, x, y, raio=10):
     )
 
     area_mascara = np.count_nonzero(mascara)
+
     maior_componente = 0
 
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
+
         if area > maior_componente:
             maior_componente = area
 
-    percentual_maior_componente = 0
+    percentual_escuro = (
+        np.count_nonzero(binaria[mascara]) / area_mascara
+    ) * 100 if area_mascara else 0
 
-    if area_mascara > 0:
-        percentual_maior_componente = (maior_componente / area_mascara) * 100
+    percentual_componente = (
+        maior_componente / area_mascara
+    ) * 100 if area_mascara else 0
+
+    escurecimento_medio = 255 - np.mean(pixels)
 
     score = (
         percentual_escuro * 0.45
-        + percentual_maior_componente * 0.35
+        + percentual_componente * 0.35
         + escurecimento_medio * 0.20
     )
 
-    return float(score)
-
-
-def ordenar_perguntas_formscanner(questions):
+    return {
+        "score": float(score),
+        "percentual_escuro": float(percentual_escuro),
+        "maior_componente": float(maior_componente),
+        "percentual_componente": float(percentual_componente),
+        "escurecimento_medio": float(escurecimento_medio)
+    }
+    
+def calcular_limite_global_marcacao(todos_scores):
     """
-    Ordena Pergunta001, Pergunta002, Pergunta003...
+    Calcula um limite dinâmico para o cartão inteiro.
+
+    A ideia é separar automaticamente:
+    - bolhas vazias/letras impressas
+    - bolhas realmente preenchidas
     """
-    def chave(item):
-        nome = item[0]
 
-        try:
-            return int(nome.replace("Pergunta", ""))
-        except Exception:
-            return 99999
+    valores = np.array(
+        [s for s in todos_scores if s is not None and s > 0],
+        dtype=np.float32
+    )
 
-    return dict(sorted(questions.items(), key=chave))
+    if len(valores) < 20:
+        return 999
 
+    # Remove extremos absurdos
+    p10 = np.percentile(valores, 10)
+    p90 = np.percentile(valores, 90)
+
+    valores_filtrados = valores[
+        (valores >= p10) & (valores <= p90)
+    ]
+
+    if len(valores_filtrados) < 20:
+        valores_filtrados = valores
+
+    # K-means simples com 2 grupos: vazio x marcado
+    centro_baixo = np.percentile(valores_filtrados, 35)
+    centro_alto = np.percentile(valores_filtrados, 90)
+
+    for _ in range(20):
+        dist_baixo = np.abs(valores - centro_baixo)
+        dist_alto = np.abs(valores - centro_alto)
+
+        grupo_baixo = valores[dist_baixo <= dist_alto]
+        grupo_alto = valores[dist_baixo > dist_alto]
+
+        if len(grupo_baixo) == 0 or len(grupo_alto) == 0:
+            break
+
+        novo_baixo = np.mean(grupo_baixo)
+        novo_alto = np.mean(grupo_alto)
+
+        if abs(novo_baixo - centro_baixo) < 0.1 and abs(novo_alto - centro_alto) < 0.1:
+            break
+
+        centro_baixo = novo_baixo
+        centro_alto = novo_alto
+
+    separacao = centro_alto - centro_baixo
+
+    # Se não há separação real, considera que o cartão está muito duvidoso
+    if separacao < 8:
+        return 999
+
+    limite = centro_baixo + (separacao * 0.65)
+
+    # Piso de segurança para não aceitar letra impressa
+    limite = max(limite, 28)
+
+    return float(limite)
+
+def decidir_resposta_por_limite_global(analises, limite_global=None):
+    """
+    Decide a resposta de forma conservadora.
+
+    Se não tiver marcação muito clara, deixa em branco.
+    """
+
+    scores = {
+        alt: dados["score"]
+        for alt, dados in analises.items()
+    }
+
+    ordenados = sorted(
+        scores.items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    if not ordenados:
+        return "", scores, "sem coordenadas"
+
+    melhor_alt, melhor_score = ordenados[0]
+    segundo_score = ordenados[1][1] if len(ordenados) > 1 else 0
+
+    melhor = analises[melhor_alt]
+
+    outros = [
+        score for alt, score in scores.items()
+        if alt != melhor_alt
+    ]
+
+    media_outros = sum(outros) / len(outros) if outros else 0
+
+    diferenca_segundo = melhor_score - segundo_score
+    diferenca_media = melhor_score - media_outros
+
+    # Regras rígidas
+    percentual_preto_minimo = 32
+    maior_componente_minimo = 35
+    score_minimo = 34
+
+    diferenca_segundo_minima = 10
+    diferenca_media_minima = 12
+
+    tem_preenchimento_real = (
+        melhor["percentual_preto"] >= percentual_preto_minimo
+        and melhor["maior_componente"] >= maior_componente_minimo
+        and melhor["score"] >= score_minimo
+    )
+
+    tem_destaque = (
+        diferenca_segundo >= diferenca_segundo_minima
+        and diferenca_media >= diferenca_media_minima
+    )
+
+    if tem_preenchimento_real and tem_destaque:
+        return melhor_alt, scores, ""
+
+    return "", scores, "vazia ou ilegivel"
 
 def ler_question_por_template(question_data, cinza, matriz, raio=10):
     """
-    Lê uma pergunta usando comparação interna entre as alternativas.
+    Lê uma pergunta comparando as alternativas da própria questão.
 
-    A alternativa só é aceita se:
-    - tiver score mínimo
-    - estiver bem acima da média das outras
-    - estiver distante da segunda melhor
+    Essa versão é conservadora, mas não usa núcleo, anel ou limite global.
     """
 
     values = question_data["values"]
+
+    analises = {}
     scores = {}
 
     for resposta, ponto in values.items():
         x_template, y_template = ponto
         x_img, y_img = transformar_ponto(matriz, x_template, y_template)
 
-        score = medir_preenchimento_por_ponto(
+        analise = analisar_bolha_por_ponto(
             cinza,
             x_img,
             y_img,
             raio=raio
         )
 
-        scores[resposta] = score
+        analises[resposta] = analise
+        scores[resposta] = analise["score"]
 
     if not scores:
         return "", scores, "sem coordenadas"
@@ -475,25 +611,39 @@ def ler_question_por_template(question_data, cinza, matriz, raio=10):
     melhor_resposta, melhor_score = ordenados[0]
     segundo_score = ordenados[1][1] if len(ordenados) > 1 else 0
 
-    valores = list(scores.values())
-    media_linha = sum(valores) / len(valores)
+    melhor = analises[melhor_resposta]
 
-    outros = [v for k, v in scores.items() if k != melhor_resposta]
-    media_outros = sum(outros) / len(outros) if outros else 0
+    outros_scores = [
+        valor for alt, valor in scores.items()
+        if alt != melhor_resposta
+    ]
+
+    media_outros = sum(outros_scores) / len(outros_scores) if outros_scores else 0
 
     diferenca_segundo = melhor_score - segundo_score
     diferenca_media = melhor_score - media_outros
 
-    # Parâmetros equilibrados
-    limite_marcacao = 30
-    diferenca_minima_segundo = 8
-    diferenca_minima_media = 10
+    score_minimo = 34
+    percentual_escuro_minimo = 20
+    maior_componente_minimo = 30
+    percentual_componente_minimo = 8
 
-    if (
-        melhor_score >= limite_marcacao
-        and diferenca_segundo >= diferenca_minima_segundo
+    diferenca_minima_segundo = 12
+    diferenca_minima_media = 14
+
+    massa_real = (
+        melhor_score >= score_minimo
+        and melhor["percentual_escuro"] >= percentual_escuro_minimo
+        and melhor["maior_componente"] >= maior_componente_minimo
+        and melhor["percentual_componente"] >= percentual_componente_minimo
+    )
+
+    destaque_real = (
+        diferenca_segundo >= diferenca_minima_segundo
         and diferenca_media >= diferenca_minima_media
-    ):
+    )
+
+    if massa_real and destaque_real:
         return melhor_resposta, scores, ""
 
     return "", scores, "vazia ou ilegivel"
@@ -761,7 +911,7 @@ def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug)
             question_data,
             cinza,
             matriz,
-            raio=12
+            raio=10
         )
 
         respostas[pergunta] = resposta
@@ -1085,7 +1235,11 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
     Processa todas as imagens de uma pasta usando o modelo .xtmpl.
 
     A cada execução, cria uma nova pasta dentro de 'saida',
-    mantendo CSV, logs, imagens de debug e pendências organizados por processo.
+    mantendo logs, imagens de debug, pendências e leituras OMR organizados por processo.
+
+    IMPORTANTE:
+    O CSV final respostas_omr.csv não é gerado aqui.
+    Ele será gerado somente depois das correções manuais no painel.
     """
 
     os.makedirs(pasta_saida, exist_ok=True)
@@ -1105,16 +1259,19 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
 
     pasta_manual = os.path.join(pasta_execucao, "manual_omr")
     os.makedirs(pasta_manual, exist_ok=True)
-    
+
     pasta_pendencias = os.path.join(pasta_execucao, "pendencias")
     os.makedirs(pasta_pendencias, exist_ok=True)
+
+    # Este dicionário será usado pelo painel de correção manual
+    leituras_omr = {}
 
     imagens = listar_imagens(pasta_imagens)
 
     pasta_projeto = os.path.dirname(os.path.abspath(__file__))
-    
+
     mapa_ra_para_id = carregar_base_alunos(pasta_projeto)
-    
+
     caminho_modelo = os.path.join(
         pasta_projeto,
         "templates",
@@ -1143,12 +1300,21 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
             status = "OK" if resultado else "ERRO"
             respostas = resultado.get("respostas", {}) if resultado else {}
             erros = resultado.get("erros", []) if resultado else []
-            
-            codigo_prova = extrair_codigo_prova_do_nome_ou_modelo(imagem, codigo_padrao="12479")
+
+            codigo_prova = extrair_codigo_prova_do_nome_ou_modelo(
+                imagem,
+                codigo_padrao="12479"
+            )
 
             if resultado:
-                codigo_barras_atual = str(resultado.get("codigo_barras", "")).strip().upper()
-                registro_academico_lido = resultado.get("registro_academico", "")
+                codigo_barras_atual = str(
+                    resultado.get("codigo_barras", "")
+                ).strip().upper()
+
+                registro_academico_lido = resultado.get(
+                    "registro_academico",
+                    ""
+                )
 
                 codigo_prova = extrair_codigo_prova_do_codigo_ou_padrao(
                     codigo_barras_atual,
@@ -1180,6 +1346,19 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
                             f"Código de Barras/QRCode001: ID não localizado na base pelo RA {registro_academico_lido}"
                         )
 
+                # Salva a leitura completa para o painel de correção manual
+                nome_debug = "template_" + os.path.basename(caminho_imagem)
+
+                leituras_omr[nome_debug] = {
+                    "arquivo_original": os.path.basename(caminho_imagem),
+                    "respostas": respostas,
+                    "pontos_mapeados": resultado.get("pontos_mapeados", {}),
+                    "registro_academico": resultado.get("registro_academico", ""),
+                    "codigo_barras": resultado.get("codigo_barras", ""),
+                    "debug_bolhas": resultado.get("debug_bolhas", ""),
+                    "erros": erros
+                }
+
             precisa_correcao_manual = len(erros) > 0
 
             resultados_formscanner.append({
@@ -1195,7 +1374,7 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
 
             if precisa_correcao_manual:
                 nome_sem_extensao = os.path.splitext(imagem)[0]
-                
+
                 caminho_imagem_pendencia = os.path.join(
                     pasta_pendencias,
                     imagem
@@ -1267,6 +1446,11 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
     caminho_log = os.path.join(pasta_execucao, "log_leitura_omr.csv")
     caminho_respostas = os.path.join(pasta_execucao, "respostas_omr.csv")
     caminho_resumo = os.path.join(pasta_execucao, "resumo_processamento.txt")
+    caminho_leituras_omr = os.path.join(pasta_execucao, "leituras_omr.json")
+
+    # Salva o JSON usado pelo painel de correção manual
+    with open(caminho_leituras_omr, "w", encoding="utf-8") as f:
+        json.dump(leituras_omr, f, ensure_ascii=False, indent=4)
 
     df_log = pd.DataFrame(log)
 
@@ -1277,10 +1461,14 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
         encoding="utf-8-sig"
     )
 
-    salvar_csv_padrao_formscanner(
-        resultados_formscanner,
-        caminho_respostas
-    )
+    # IMPORTANTE:
+    # O CSV final será gerado somente após a correção manual no painel.
+    # Por isso, esta função permanece comentada.
+    #
+    # salvar_csv_padrao_formscanner(
+    #     resultados_formscanner,
+    #     caminho_respostas
+    # )
 
     total_imagens = len(imagens)
     total_ok = sum(1 for item in log if item["status"] == "OK")
@@ -1299,10 +1487,12 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
         f.write(f"Total com erro: {total_erro}\n")
         f.write(f"Total enviado para correção manual: {total_manual}\n\n")
         f.write("Arquivos gerados:\n")
-        f.write(f"- CSV de respostas: {caminho_respostas}\n")
+        f.write("- CSV de respostas: será gerado após a correção manual\n")
         f.write(f"- Log de leitura: {caminho_log}\n")
+        f.write(f"- Leituras OMR: {caminho_leituras_omr}\n")
         f.write(f"- Debug das imagens: {pasta_debug}\n")
         f.write(f"- Pendências manuais: {pasta_manual}\n")
+        f.write(f"- Imagens pendentes: {pasta_pendencias}\n")
 
     return {
         "total_imagens": total_imagens,
@@ -1314,5 +1504,7 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
         "respostas": caminho_respostas,
         "debug": pasta_debug,
         "manual": pasta_manual,
-        "resumo": caminho_resumo
+        "resumo": caminho_resumo,
+        "pasta_processamento": pasta_execucao,
+        "leituras_omr": caminho_leituras_omr
     }

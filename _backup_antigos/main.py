@@ -120,7 +120,7 @@ def buscar_aluno(base, id_extraido, nome_extraido):
 
 def corrigir_textos(df):
     df = df.replace("InglÃªs", "Ingles", regex=True)
-    df = df.replace("Inglês", "Ingles", regex=True)
+    df = df.replace("Ingles", "Ingles", regex=True)
     return df
 
 
