@@ -1230,7 +1230,7 @@ def montar_codigo_barras_por_ra(registro_academico, mapa_ra_para_id, codigo_prov
 
     return f"{codigo_prova}A{id_aluno}"
        
-def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
+def processar_imagens_omr(pasta_imagens, pasta_saida="saida", progresso_callback=None):
     """
     Processa todas as imagens de uma pasta usando o modelo .xtmpl.
 
@@ -1267,6 +1267,15 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
     leituras_omr = {}
 
     imagens = listar_imagens(pasta_imagens)
+    
+    total_imagens_callback = len(imagens)
+
+    if progresso_callback:
+        progresso_callback(
+            0,
+            total_imagens_callback,
+            "Iniciando leitura OMR..."
+        )
 
     pasta_projeto = os.path.dirname(os.path.abspath(__file__))
 
@@ -1287,7 +1296,13 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
     linhas_respostas = []
     resultados_formscanner = []
 
-    for imagem in imagens:
+    for indice, imagem in enumerate(imagens, start=1):
+        if progresso_callback:
+            progresso_callback(
+                indice - 1,
+                total_imagens_callback,
+                f"Processando imagem {indice} de {total_imagens_callback}: {imagem}"
+            )
         caminho_imagem = os.path.join(pasta_imagens, imagem)
 
         try:
@@ -1425,6 +1440,13 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
                 "debug_cantos": resultado.get("debug_cantos", "") if resultado else "",
                 "detalhe": detalhe
             })
+            
+            if progresso_callback:
+                progresso_callback(
+                    indice,
+                    total_imagens_callback,
+                    f"Imagem {indice} de {total_imagens_callback} concluída."
+                )
 
         except Exception as e:
             log.append({
@@ -1442,6 +1464,13 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
                 "debug_cantos": "",
                 "detalhe": "Erro ao processar imagem"
             })
+            
+            if progresso_callback:
+                progresso_callback(
+                    indice,
+                    total_imagens_callback,
+                    f"Imagem {indice} de {total_imagens_callback} finalizada com erro."
+                )
 
     caminho_log = os.path.join(pasta_execucao, "log_leitura_omr.csv")
     caminho_respostas = os.path.join(pasta_execucao, "respostas_omr.csv")
@@ -1494,6 +1523,13 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida"):
         f.write(f"- Pendências manuais: {pasta_manual}\n")
         f.write(f"- Imagens pendentes: {pasta_pendencias}\n")
 
+    if progresso_callback:
+        progresso_callback(
+            total_imagens,
+            total_imagens,
+            "Processamento OMR concluído."
+        )
+        
     return {
         "total_imagens": total_imagens,
         "total_ok": total_ok,

@@ -66,6 +66,33 @@ def escolher_pasta():
 
         escrever_log(f"Pasta do projeto alterada para: {pasta}")
 
+def atualizar_progresso(valor, total, mensagem=""):
+    def aplicar():
+        if total <= 0:
+            progress_var.set(0)
+            lbl_progresso.config(text="0%  |  Nenhuma imagem encontrada.")
+            return
+
+        percentual = int((valor / total) * 100)
+        percentual = max(0, min(percentual, 100))
+
+        progress_var.set(percentual)
+
+        if mensagem:
+            lbl_progresso.config(text=f"{percentual}%  |  {mensagem}")
+            escrever_log(mensagem)
+        else:
+            lbl_progresso.config(text=f"{percentual}%")
+
+        janela.update_idletasks()
+
+    janela.after(0, aplicar)
+
+
+def resetar_progresso():
+    progress_var.set(0)
+    lbl_progresso.config(text="0%  |  Aguardando processamento...")
+    janela.update_idletasks()
 
 def abrir_pasta(caminho):
     if os.path.exists(caminho):
@@ -174,8 +201,6 @@ def abrir_painel_validacao():
 
 
 def selecionar_imagens_omr():
-    global ultimo_processamento
-
     pasta = filedialog.askdirectory(
         title="Selecione a pasta com as imagens OMR"
     )
@@ -183,49 +208,76 @@ def selecionar_imagens_omr():
     if not pasta:
         return
 
-    try:
-        limpar_log()
-        definir_status("Lendo cartões OMR...")
-        escrever_log("Iniciando leitura OMR...")
-        escrever_log(f"Pasta selecionada: {pasta}")
+    thread = threading.Thread(
+        target=executar_leitura_omr_em_thread,
+        args=(pasta,),
+        daemon=True
+    )
+    thread.start()
+    
+def executar_leitura_omr_em_thread(pasta):
+    global ultimo_processamento
 
-        resultado = processar_imagens_omr(pasta)
+    try:
+        janela.after(0, limpar_log)
+        janela.after(0, resetar_progresso)
+        janela.after(0, lambda: definir_status("Lendo cartões OMR..."))
+        janela.after(0, lambda: escrever_log("Iniciando leitura OMR..."))
+        janela.after(0, lambda: escrever_log(f"Pasta selecionada: {pasta}"))
+        janela.after(0, lambda: btn_omr.config(state="disabled"))
+
+        resultado = processar_imagens_omr(
+            pasta,
+            progresso_callback=atualizar_progresso
+        )
 
         ultimo_processamento = (
             resultado.get("pasta_processamento")
             or resultado.get("pasta_execucao")
         )
 
-        escrever_log(f"Total de imagens encontradas: {resultado['total_imagens']}")
-        escrever_log(f"Total com leitura OK: {resultado['total_ok']}")
-        escrever_log(f"Total enviado para conferência: {resultado['total_manual']}")
-        escrever_log(f"Log gerado em: {resultado['log']}")
+        def finalizar_interface():
+            escrever_log(f"Total de imagens encontradas: {resultado['total_imagens']}")
+            escrever_log(f"Total com leitura OK: {resultado['total_ok']}")
+            escrever_log(f"Total enviado para conferência: {resultado['total_manual']}")
+            escrever_log(f"Log gerado em: {resultado['log']}")
 
-        if resultado.get("leituras_omr"):
-            escrever_log(f"Leituras OMR: {resultado['leituras_omr']}")
+            if resultado.get("leituras_omr"):
+                escrever_log(f"Leituras OMR: {resultado['leituras_omr']}")
 
-        definir_status("Leitura concluída. Abrindo painel de conferência...")
+            definir_status("Leitura concluída. Abrindo painel de conferência...")
+            progress_var.set(100)
+            lbl_progresso.config(text="100%  |  Processamento concluído.")
+            btn_omr.config(state="normal")
+            janela.update_idletasks()
 
-        if ultimo_processamento and os.path.exists(ultimo_processamento):
-            abrir_painel_correcao_omr(ultimo_processamento)
-        else:
-            messagebox.showwarning(
-                "Correção OMR",
-                "A leitura foi concluída, mas a pasta do processamento não foi encontrada."
-            )
+            if ultimo_processamento and os.path.exists(ultimo_processamento):
+                abrir_painel_correcao_omr(ultimo_processamento)
+            else:
+                messagebox.showwarning(
+                    "Correção OMR",
+                    "A leitura foi concluída, mas a pasta do processamento não foi encontrada."
+                )
+
+        janela.after(0, finalizar_interface)
 
     except Exception as e:
-        messagebox.showerror("Erro", str(e))
-        escrever_log(f"Erro: {e}")
-        definir_status("Erro na leitura OMR.")
+        erro = str(e)
 
+        def mostrar_erro():
+            messagebox.showerror("Erro", erro)
+            escrever_log(f"Erro: {erro}")
+            definir_status("Erro na leitura OMR.")
+            btn_omr.config(state="normal")
+
+        janela.after(0, mostrar_erro)
 
 # =========================
 # INTERFACE
 # =========================
 
 janela = tk.Tk()
-janela.title("Automação de Simulados")
+janela.title("OMRCheck")
 janela.geometry("980x680")
 janela.minsize(900, 620)
 janela.configure(bg=COR_FUNDO)
@@ -233,6 +285,16 @@ janela.configure(bg=COR_FUNDO)
 
 style = ttk.Style()
 style.theme_use("clam")
+
+style.configure(
+    "Azul.Horizontal.TProgressbar",
+    troughcolor="#E9EDF5",
+    background=COR_AZUL,
+    bordercolor=COR_BORDA,
+    lightcolor=COR_AZUL,
+    darkcolor=COR_AZUL,
+    thickness=14
+)
 
 style.configure(
     "TFrame",
@@ -335,14 +397,14 @@ header.pack(fill=tk.X)
 
 titulo = ttk.Label(
     header,
-    text="Automação de Simulados",
+    text="OMRCheck",
     style="Title.TLabel"
 )
 titulo.pack(anchor="w")
 
 subtitulo = ttk.Label(
     header,
-    text="Leitura OMR, conferência manual e geração do CSV final.",
+    text="Leitura, conferência e geração de resultados de simulados.",
     style="Subtitle.TLabel"
 )
 subtitulo.pack(anchor="w", pady=(3, 18))
@@ -487,6 +549,31 @@ lbl_status = tk.Label(
 )
 lbl_status.pack(side=tk.RIGHT)
 
+# Barra de progresso
+frame_progresso = tk.Frame(card_log_interno, bg=COR_CARD)
+frame_progresso.pack(fill=tk.X, pady=(0, 10))
+
+progress_var = tk.IntVar(value=0)
+
+barra_progresso = ttk.Progressbar(
+    frame_progresso,
+    orient="horizontal",
+    mode="determinate",
+    variable=progress_var,
+    maximum=100,
+    style="Azul.Horizontal.TProgressbar"
+)
+barra_progresso.pack(fill=tk.X)
+
+lbl_progresso = tk.Label(
+    frame_progresso,
+    text="Aguardando processamento...",
+    bg=COR_CARD,
+    fg=COR_TEXTO_SUAVE,
+    font=("Segoe UI", 9)
+)
+lbl_progresso.pack(anchor="w", pady=(4, 0))
+
 frame_texto = tk.Frame(card_log_interno, bg=COR_CARD)
 frame_texto.pack(fill=tk.BOTH, expand=True)
 
@@ -514,7 +601,7 @@ caixa_log.configure(state="disabled")
 # Rodapé
 rodape = ttk.Label(
     container,
-    text="Fluxo recomendado: Atualizar base → Selecionar imagens OMR → Conferir no painel → Gerar CSV Final.",
+    text="Fluxo recomendado: Atualizar base → Selecionar imagens → Conferir no painel → Gerar CSV final.",
     style="Subtitle.TLabel"
 )
 rodape.pack(anchor="w", pady=(12, 0))

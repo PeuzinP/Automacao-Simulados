@@ -1,4 +1,4 @@
-# Automação de Simulados
+# OMRCheck
 
 Sistema interno para leitura de cartões-resposta OMR, conferência manual das marcações e geração do CSV final no padrão esperado para importação dos resultados dos simulados.
 
@@ -62,7 +62,7 @@ Automação Simulados/
 │
 └── _backup_antigos/
 
-# Automação de Simulados
+# OMRCheck
 
 Sistema interno para leitura de cartões-resposta OMR, conferência manual das marcações e geração do CSV final no padrão esperado para importação dos resultados dos simulados.
 
