@@ -839,6 +839,177 @@ def ler_codigo_barras_por_template(imagem, modelo, matriz, pasta_debug=None, nom
 
     return ""
 
+def extrair_numero_pergunta(nome_pergunta):
+    match = re.search(r"(\d+)$", str(nome_pergunta))
+
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
+def classificar_confianca_questao(pergunta, resposta, scores, erro):
+    """
+    Camada de auditoria da leitura OMR.
+
+    Esta função NÃO altera a resposta lida.
+    Ela apenas classifica a questão para facilitar a conferência manual.
+    """
+
+    numero = extrair_numero_pergunta(pergunta)
+    eh_questao_objetiva = numero is not None and numero >= 9
+
+    if not eh_questao_objetiva:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "CAMPO_AUXILIAR",
+            "pendencia": False,
+            "motivo": "Campo auxiliar, RA, idioma ou cor da capa.",
+            "scores": scores or {}
+        }
+
+    if not scores:
+        return {
+            "pergunta": pergunta,
+            "resposta": "",
+            "status": "SEM_COORDENADAS",
+            "pendencia": True,
+            "motivo": "Não foi possível obter scores da questão.",
+            "melhor_alternativa": "",
+            "melhor_score": 0,
+            "segunda_alternativa": "",
+            "segundo_score": 0,
+            "diferenca": 0,
+            "scores": {}
+        }
+
+    ordenados = sorted(
+        scores.items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    melhor_alt, melhor_score = ordenados[0]
+    segunda_alt, segundo_score = ordenados[1] if len(ordenados) > 1 else ("", 0)
+
+    diferenca = melhor_score - segundo_score
+
+    # Limites apenas para auditoria, não mudam a leitura principal.
+    LIMITE_RESPOSTA_FORTE = 30
+    LIMITE_RESPOSTA_FRACA = 18
+    DIFERENCA_SEGURA = 10
+    DIFERENCA_DUVIDOSA = 7
+
+    alternativas_fortes = [
+        alt for alt, score in scores.items()
+        if score >= LIMITE_RESPOSTA_FORTE
+    ]
+
+    if not resposta:
+        return {
+            "pergunta": pergunta,
+            "resposta": "",
+            "status": "EM_BRANCO",
+            "pendencia": True,
+            "motivo": "A leitura principal não identificou alternativa marcada.",
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    if len(alternativas_fortes) >= 2:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "MULTIPLA_MARCACAO",
+            "pendencia": True,
+            "motivo": "Duas ou mais alternativas tiveram score alto.",
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    if melhor_score < LIMITE_RESPOSTA_FRACA:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "DUVIDOSA",
+            "pendencia": True,
+            "motivo": "Resposta lida com score baixo. Possível falso positivo.",
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    if diferenca <= DIFERENCA_DUVIDOSA:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "DUVIDOSA",
+            "pendencia": True,
+            "motivo": "A melhor alternativa ficou próxima da segunda.",
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    if erro:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "DUVIDOSA",
+            "pendencia": True,
+            "motivo": str(erro),
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    if melhor_score >= LIMITE_RESPOSTA_FORTE and diferenca >= DIFERENCA_SEGURA:
+        return {
+            "pergunta": pergunta,
+            "resposta": resposta,
+            "status": "CONFIAVEL",
+            "pendencia": False,
+            "motivo": "Leitura considerada segura.",
+            "melhor_alternativa": melhor_alt,
+            "melhor_score": float(melhor_score),
+            "segunda_alternativa": segunda_alt,
+            "segundo_score": float(segundo_score),
+            "diferenca": float(diferenca),
+            "scores": scores
+        }
+
+    return {
+        "pergunta": pergunta,
+        "resposta": resposta,
+        "status": "DUVIDOSA",
+        "pendencia": True,
+        "motivo": "Leitura intermediária. Recomendada conferência manual.",
+        "melhor_alternativa": melhor_alt,
+        "melhor_score": float(melhor_score),
+        "segunda_alternativa": segunda_alt,
+        "segundo_score": float(segundo_score),
+        "diferenca": float(diferenca),
+        "scores": scores
+    }
+
 def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug):
     """
     Le o cartao usando o .xtmpl completo, no padrao FormScanner:
@@ -894,6 +1065,8 @@ def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug)
     respostas = {}
     erros = []
     pontos_mapeados = {}
+    confianca_questoes = {}
+    pendencias_confianca = []
 
     for pergunta, question_data in perguntas.items():
         pontos_mapeados[pergunta] = {}
@@ -907,7 +1080,7 @@ def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug)
                 "y": float(y_img)
             }
 
-        resposta, _scores, erro = ler_question_por_template(
+        resposta, scores, erro = ler_question_por_template(
             question_data,
             cinza,
             matriz,
@@ -915,6 +1088,18 @@ def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug)
         )
 
         respostas[pergunta] = resposta
+
+        analise_confianca = classificar_confianca_questao(
+            pergunta,
+            resposta,
+            scores,
+            erro
+        )
+
+        confianca_questoes[pergunta] = analise_confianca
+
+        if analise_confianca.get("pendencia"):
+            pendencias_confianca.append(analise_confianca)
 
         if erro:
             erros.append(f"{pergunta}: {erro}")
@@ -962,6 +1147,9 @@ def detectar_respostas_por_template(caminho_imagem, caminho_modelo, pasta_debug)
         "respostas": respostas,
         "erros": erros,
         "pontos_mapeados": pontos_mapeados,
+        "confianca_questoes": confianca_questoes,
+        "pendencias_confianca": pendencias_confianca,
+        "total_pendencias_confianca": len(pendencias_confianca),
         "debug_bolhas": caminho_saida,
         "debug_cantos": caminho_debug_cantos,
     }, "Leitura por template completo concluida"
@@ -1371,7 +1559,10 @@ def processar_imagens_omr(pasta_imagens, pasta_saida="saida", progresso_callback
                     "registro_academico": resultado.get("registro_academico", ""),
                     "codigo_barras": resultado.get("codigo_barras", ""),
                     "debug_bolhas": resultado.get("debug_bolhas", ""),
-                    "erros": erros
+                    "erros": erros,
+                    "confianca_questoes": resultado.get("confianca_questoes", {}),
+                    "pendencias_confianca": resultado.get("pendencias_confianca", []),
+                    "total_pendencias_confianca": resultado.get("total_pendencias_confianca", 0)
                 }
 
             precisa_correcao_manual = len(erros) > 0

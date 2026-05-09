@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import csv
 import tkinter as tk
@@ -27,6 +28,13 @@ try:
 except AttributeError:
     RESAMPLE = Image.LANCZOS
 
+def caminho_recurso(caminho_relativo):
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(base, caminho_relativo)
 
 class PainelCorrecaoOMR:
     def __init__(self, pasta_processamento):
@@ -58,6 +66,7 @@ class PainelCorrecaoOMR:
         self.correcoes = self.carregar_correcoes()
 
         self.imagens = self.listar_imagens_debug()
+        self.imagens_todas = list(self.imagens)
         self.indice_atual = 0
 
         self.modo_cor = "verde"
@@ -73,10 +82,17 @@ class PainelCorrecaoOMR:
         self.offset_y = 0
 
         self.root = tk.Toplevel()
-        self.root.title("Painel de Correção OMR")
+        self.root.title("OMRCheck | Painel de Correção")
         self.root.geometry("1500x900")
         self.root.minsize(1200, 760)
         self.root.configure(bg=COR_FUNDO)
+        
+        caminho_icone = os.path.join(os.getcwd(), "assets", "omrcheck.ico")
+
+        caminho_icone = caminho_recurso(os.path.join("assets", "omrcheck.ico"))
+
+        if os.path.exists(caminho_icone):
+            self.root.iconbitmap(default=caminho_icone)
 
         self.criar_interface()
 
@@ -238,7 +254,7 @@ class PainelCorrecaoOMR:
 
         titulo = tk.Label(
             bloco_titulo,
-            text="Painel de Correção OMR",
+            text="OMRCheck | Painel de Correção",
             bg=COR_FUNDO,
             fg=COR_TEXTO,
             font=("Segoe UI", 20, "bold")
@@ -425,6 +441,89 @@ class PainelCorrecaoOMR:
             highlightthickness=1
         )
         info_card.pack(fill=tk.X, pady=(0, 12))
+        
+        # =========================
+        # FILTROS DE CONFIANÇA
+        # =========================
+
+        filtro_card = tk.Frame(
+            container,
+            bg=COR_CARD,
+            highlightbackground=COR_BORDA,
+            highlightthickness=1
+        )
+        filtro_card.pack(fill=tk.X, pady=(0, 12))
+
+        filtro_interno = tk.Frame(filtro_card, bg=COR_CARD)
+        filtro_interno.pack(fill=tk.X, padx=14, pady=10)
+
+        tk.Label(
+            filtro_interno,
+            text="Pesquisar:",
+            bg=COR_CARD,
+            fg=COR_TEXTO,
+            font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.var_busca = tk.StringVar()
+
+        entry_busca = tk.Entry(
+            filtro_interno,
+            textvariable=self.var_busca,
+            font=("Segoe UI", 10),
+            width=32
+        )
+        entry_busca.pack(side=tk.LEFT, padx=(0, 16), ipady=3)
+
+        tk.Label(
+            filtro_interno,
+            text="Filtro:",
+            bg=COR_CARD,
+            fg=COR_TEXTO,
+            font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.var_filtro_confianca = tk.StringVar(value="Todos")
+
+        combo_filtro = ttk.Combobox(
+            filtro_interno,
+            textvariable=self.var_filtro_confianca,
+            state="readonly",
+            width=20,
+            values=[
+                "Todos",
+                "Com pendência",
+                "Duvidosas",
+                "Em branco",
+                "Múltiplas",
+                "Sem coordenadas",
+                "Confiáveis"
+            ]
+        )
+        combo_filtro.pack(side=tk.LEFT, padx=(0, 12))
+
+        btn_filtrar = ttk.Button(
+            filtro_interno,
+            text="Aplicar filtro",
+            command=self.aplicar_filtros,
+            style="Secondary.TButton"
+        )
+        btn_filtrar.pack(side=tk.LEFT)
+
+        btn_limpar = ttk.Button(
+            filtro_interno,
+            text="Limpar",
+            command=lambda: (
+                self.var_busca.set(""),
+                self.var_filtro_confianca.set("Todos"),
+                self.aplicar_filtros()
+            ),
+            style="Secondary.TButton"
+        )
+        btn_limpar.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.var_busca.trace_add("write", self.aplicar_filtros)
+        combo_filtro.bind("<<ComboboxSelected>>", self.aplicar_filtros)
 
         info_interno = tk.Frame(info_card, bg=COR_CARD)
         info_interno.pack(fill=tk.X, padx=14, pady=8)
@@ -521,6 +620,120 @@ class PainelCorrecaoOMR:
 
         self.aplicar_zoom_modo()
         self.redesenhar_imagem()
+
+    def obter_dados_filtro_imagem(self, nome_imagem):
+        if not hasattr(self, "leituras_omr"):
+            return {}
+
+        if nome_imagem in self.leituras_omr:
+            return self.leituras_omr[nome_imagem]
+
+        nome_base = os.path.basename(nome_imagem)
+
+        if nome_base in self.leituras_omr:
+            return self.leituras_omr[nome_base]
+
+        for chave, dados in self.leituras_omr.items():
+            arquivo_original = dados.get("arquivo_original", "")
+
+            if chave == nome_base or arquivo_original == nome_base:
+                return dados
+
+        return {}
+
+
+    def imagem_passa_filtro(self, nome_imagem):
+        termo = self.var_busca.get().strip().lower() if hasattr(self, "var_busca") else ""
+        filtro = self.var_filtro_confianca.get() if hasattr(self, "var_filtro_confianca") else "Todos"
+
+        dados = self.obter_dados_filtro_imagem(nome_imagem)
+
+        pendencias = dados.get("pendencias_confianca", [])
+        respostas = dados.get("respostas", {})
+        ra = str(dados.get("registro_academico", "")).lower()
+        codigo = str(dados.get("codigo_barras", "")).lower()
+        arquivo_original = str(dados.get("arquivo_original", "")).lower()
+
+        texto_busca = " ".join([
+            nome_imagem.lower(),
+            arquivo_original,
+            ra,
+            codigo,
+            " ".join([str(p.get("pergunta", "")).lower() for p in pendencias]),
+            " ".join([str(p.get("status", "")).lower() for p in pendencias]),
+        ])
+
+        if termo and termo not in texto_busca:
+            return False
+
+        if filtro == "Todos":
+            return True
+
+        if filtro == "Com pendência":
+            return len(pendencias) > 0
+
+        mapa_filtro_status = {
+            "Duvidosas": "DUVIDOSA",
+            "Em branco": "EM_BRANCO",
+            "Múltiplas": "MULTIPLA_MARCACAO",
+            "Sem coordenadas": "SEM_COORDENADAS",
+            "Confiáveis": "CONFIAVEL"
+        }
+
+        status_desejado = mapa_filtro_status.get(filtro)
+
+        if not status_desejado:
+            return True
+
+        if filtro == "Confiáveis":
+            total_pendencias = len(pendencias)
+            return total_pendencias == 0
+
+        for pendencia in pendencias:
+            if pendencia.get("status") == status_desejado:
+                return True
+
+        return False
+
+
+    def aplicar_filtros(self, *args):
+        self.imagens = [
+            nome for nome in self.imagens_todas
+            if self.imagem_passa_filtro(nome)
+        ]
+
+        self.indice_atual = 0
+
+        if not self.imagens:
+            self.canvas.delete("all")
+            self.lbl_info.config(
+                text="Nenhuma imagem encontrada para o filtro selecionado."
+            )
+            return
+
+        self.carregar_imagem_atual()
+
+
+    def resumo_pendencias_imagem_atual(self):
+        nome = self.nome_imagem_atual()
+        dados = self.obter_dados_filtro_imagem(nome)
+        pendencias = dados.get("pendencias_confianca", [])
+
+        if not pendencias:
+            return "Sem pendências"
+
+        contagem = {}
+
+        for item in pendencias:
+            status = item.get("status", "OUTRA")
+            contagem[status] = contagem.get(status, 0) + 1
+
+        partes = [
+            f"{status}: {qtd}"
+            for status, qtd in contagem.items()
+        ]
+
+        return " | ".join(partes)
 
     def ao_redimensionar_canvas(self, event=None):
         if self.imagem_original is not None:
@@ -634,17 +847,27 @@ class PainelCorrecaoOMR:
         self.atualizar_info()
 
     def atualizar_info(self):
+        if not self.imagens:
+            self.lbl_info.config(
+                text="Nenhuma imagem encontrada para o filtro selecionado."
+            )
+            return
+
         nome = self.nome_imagem_atual()
-        total = len(self.imagens)
+        total_filtrado = len(self.imagens)
+        total_geral = len(self.imagens_todas)
         atual = self.indice_atual + 1
         qtd = len(self.correcoes.get(nome, []))
+        resumo_pendencias = self.resumo_pendencias_imagem_atual()
 
         self.lbl_info.config(
             text=(
-                f"Imagem {atual}/{total}   |   "
+                f"Imagem {atual}/{total_filtrado} "
+                f"(total: {total_geral})   |   "
                 f"{nome}   |   "
                 f"Marcações manuais: {qtd}   |   "
-                f"Modo atual: {self.var_cor.get().capitalize()}"
+                f"Modo atual: {self.var_cor.get().capitalize()}   |   "
+                f"Confiança: {resumo_pendencias}"
             )
         )
 
